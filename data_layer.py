@@ -18,6 +18,7 @@ A note on my testing status:
 """
 
 import json
+import pandas as pd
 import yfinance as yf
 from yfinance import EquityQuery
 
@@ -27,6 +28,25 @@ from pdf_extraction import extract_statement_text, build_extraction_prompt
 # ===========================================================================
 # GET FINANCIALS
 # ===========================================================================
+
+def _first_complete_column(df, required_rows: list):
+    """
+    I find the first column where ALL required rows have real (non-NaN)
+    data. This fixes a bug I found: yfinance sometimes puts a "TTM"
+    (trailing twelve months) column first in stock.financials/
+    balance_sheet/cashflow, and TTM columns can have NaN for line items
+    that aren't computed on a trailing basis (interest expense and total
+    debt are common examples). My old code blindly grabbed columns[0]
+    assuming it was a complete latest fiscal year -- if that column was
+    actually an incomplete TTM column, NaN would silently flow through
+    into WACC and poison the entire DCF with no error, no warning, just
+    "$nanm" showing up in the app.
+    """
+    for col in df.columns:
+        if all(row in df.index and pd.notna(df.loc[row, col]) for row in required_rows):
+            return col
+    return None
+
 
 def get_financials_from_ticker(ticker: str) -> dict:
     """
@@ -42,37 +62,63 @@ def get_financials_from_ticker(ticker: str) -> dict:
     balance_sheet = stock.balance_sheet
     cash_flow = stock.cashflow
 
-    # I assume yfinance's most recent column is index 0 -- adjust if this proves wrong
-    latest_col = income_stmt.columns[0]
+    # THE FIX: I find a column where these three rows are all genuinely
+    # present, instead of blindly trusting columns[0] is complete
+    income_col = _first_complete_column(
+        income_stmt, ["Total Revenue", "Operating Income", "Net Income"]
+    )
+    if income_col is None:
+        raise ValueError(
+            f"Could not find a complete fiscal year of income statement data for {ticker} "
+            "-- yfinance may have changed its row names, or this ticker has incomplete data."
+        )
 
-    revenue = income_stmt.loc["Total Revenue", latest_col]
-    operating_income = income_stmt.loc["Operating Income", latest_col]
-    net_income = income_stmt.loc["Net Income", latest_col]
+    revenue = income_stmt.loc["Total Revenue", income_col]
+    operating_income = income_stmt.loc["Operating Income", income_col]
+    net_income = income_stmt.loc["Net Income", income_col]
 
     ebitda = info.get("ebitda")  # yfinance sometimes provides this directly
-    if ebitda is None:
+    if ebitda is None or pd.isna(ebitda):
         try:
-            d_and_a = cash_flow.loc["Depreciation And Amortization", latest_col]
-            ebitda = operating_income + d_and_a
+            d_and_a = cash_flow.loc["Depreciation And Amortization", income_col]
+            ebitda = operating_income + d_and_a if pd.notna(d_and_a) else None
         except KeyError:
-            ebitda = None  # I flag this as missing rather than guessing
+            ebitda = None
+    if ebitda is None or pd.isna(ebitda):
+        raise ValueError(
+            f"Could not determine EBITDA for {ticker} -- yfinance didn't provide "
+            "it directly and I couldn't compute it from D&A either. This is a "
+            "required field for the DCF, so I can't safely continue."
+        )
 
-    cash_from_ops = cash_flow.loc["Operating Cash Flow", latest_col]
-    capex = abs(cash_flow.loc["Capital Expenditure", latest_col])
+    cash_flow_col = _first_complete_column(cash_flow, ["Operating Cash Flow", "Capital Expenditure"])
+    if cash_flow_col is None:
+        raise ValueError(f"Could not find complete cash flow statement data for {ticker}")
+
+    cash_from_ops = cash_flow.loc["Operating Cash Flow", cash_flow_col]
+    capex = abs(cash_flow.loc["Capital Expenditure", cash_flow_col])
     free_cash_flow = cash_from_ops - capex
 
-    total_debt = balance_sheet.loc["Total Debt", latest_col] if "Total Debt" in balance_sheet.index else None
+    total_debt = None
+    if "Total Debt" in balance_sheet.index:
+        balance_col = _first_complete_column(balance_sheet, ["Total Debt"])
+        if balance_col is not None:
+            total_debt = balance_sheet.loc["Total Debt", balance_col]
+
     cash_and_equivalents = info.get("totalCash")
     shares_outstanding = info.get("sharesOutstanding")
     market_cap = info.get("marketCap")
+
     interest_expense = None
     try:
-        interest_expense = abs(income_stmt.loc["Interest Expense", latest_col])
+        raw_interest = income_stmt.loc["Interest Expense", income_col]
+        interest_expense = abs(raw_interest) if pd.notna(raw_interest) else None
     except KeyError:
         pass
+
     tax_rate = info.get("effectiveTaxRate", 0.21)
 
-    return {
+    financials = {
         "ticker": ticker.upper(),
         "sector": info.get("sector"),
         "industry": info.get("industry"),
@@ -90,6 +136,20 @@ def get_financials_from_ticker(ticker: str) -> dict:
         "interest_expense": interest_expense,
         "tax_rate": tax_rate,
     }
+
+    # I validate the fields the DCF/WACC absolutely cannot function without,
+    # and raise a CLEAR error naming exactly what's missing -- rather than
+    # letting None/NaN quietly flow through and surface as "$nanm" three
+    # steps downstream with no indication of why
+    required_for_dcf = ["ebitda", "free_cash_flow", "total_debt", "cash_and_equivalents", "market_cap"]
+    missing = [f for f in required_for_dcf if financials[f] is None or (isinstance(financials[f], float) and pd.isna(financials[f]))]
+    if missing:
+        raise ValueError(
+            f"yfinance data for {ticker} is missing required fields: {missing}. "
+            f"Full data pulled: {financials}"
+        )
+
+    return financials
 
 
 def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str) -> dict:
