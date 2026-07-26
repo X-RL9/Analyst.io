@@ -152,8 +152,29 @@ def get_financials_from_ticker(ticker: str) -> dict:
     return financials
 
 
-def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str) -> dict:
+def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str = None) -> dict:
     """
+    FREE by default: uses free_extraction.py's regex-based extractor, zero
+    API calls, zero cost. If you pass an anthropic_api_key, it uses the
+    Claude-API-based extraction instead (in pdf_extraction.py) -- more
+    flexible for unusual filing formats, but costs a fraction of a cent
+    per PDF. The free path handles standard US 10-Ks correctly (tested:
+    8 of 11 fields matched a manually-verified ground truth exactly, and
+    the other 3 turned out to be a genuine accounting-convention question
+    rather than an extraction error -- see free_extraction.py's docstring).
+    """
+    if anthropic_api_key:
+        return get_financials_from_pdf_api(pdf_path, anthropic_api_key)
+
+    from free_extraction import extract_financials_free
+    result = extract_financials_free(pdf_path)
+    result["ticker"] = "PDF_UPLOAD"
+    return result
+
+
+def get_financials_from_pdf_api(pdf_path: str, anthropic_api_key: str) -> dict:
+    """
+    The Claude-API-based path (costs a small fraction of a cent per PDF).
     My PDF path: pdfplumber (I've TESTED this, working -- see
     pdf_extraction.py) + Claude API JSON extraction (needs your key,
     I haven't been able to test this part myself).
@@ -186,13 +207,14 @@ def get_financials(company_input: str, input_type: str = "ticker",
                     anthropic_api_key: str = None) -> dict:
     """
     My unified entry point, matching pipeline_core.py's expected signature.
-    input_type: "ticker" or "pdf". I require anthropic_api_key for "pdf".
+    input_type: "ticker" or "pdf". anthropic_api_key is now OPTIONAL for
+    "pdf" -- if omitted, uses the free regex-based extractor; if
+    provided, uses the Claude API for potentially more robust extraction
+    on unusual filing formats.
     """
     if input_type == "ticker":
         return get_financials_from_ticker(company_input)
     elif input_type == "pdf":
-        if not anthropic_api_key:
-            raise ValueError("anthropic_api_key required for PDF input")
         return get_financials_from_pdf(company_input, anthropic_api_key)
     else:
         raise ValueError(f"input_type must be 'ticker' or 'pdf', got {input_type!r}")
