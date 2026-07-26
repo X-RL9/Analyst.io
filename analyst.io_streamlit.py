@@ -1,75 +1,37 @@
 """
-app.py -- my Streamlit interface for the DCF / Comps / LBO pipeline.
+analyst.io_streamlit.py -- my Streamlit interface for the DCF / Comps / LBO pipeline.
 
-MOCK MODE: the real backend modules (get_financials, run_dcf, run_comps,
-find_peers) are still placeholders (see pipeline_orchestrator.py). I've
-built this app to run on mocked data so you can test the full UI/flow
-now. Flip MOCK_MODE to False once those modules are wired in -- the
-pipeline call itself (run_pipeline(...)) doesn't change, only the data
-underneath it.
+I've wired this to the REAL pipeline (pipeline_real.py) now, not mock data.
 
-Run locally with: streamlit run app.py
+My testing status, to be precise: I've validated the LBO math, DCF math,
+WACC math, and PDF statement-location logic myself, with synthetic/real
+data. I have NOT been able to test the actual yfinance calls (find_peers,
+run_comps, get_financials for tickers) because Yahoo Finance isn't
+reachable from my sandbox -- this will be the first time they run
+against live data. If something breaks, please send me the exact error
+message (screenshot is fine) so I can fix it.
+
+Run with: streamlit run analyst.io_streamlit.py
+Needs these files in the same folder: lbo_financing.py,
+pipeline_orchestrator.py, data_layer.py, wacc_beta.py, dcf_engine.py,
+pdf_extraction.py, pipeline_real.py, requirements.txt
 """
 
 import streamlit as st
 import pandas as pd
+import tempfile
 
-from lbo_financing import build_capital_structure, project_debt_schedule, calculate_returns
-from pipeline_orchestrator import recommend_financing
-
-MOCK_MODE = True  # flip to False once get_financials/run_dcf/run_comps/find_peers are real
-
-
-# ---------------------------------------------------------------------------
-# MY MOCK DATA -- delete this block once the real backend modules are wired in
-# ---------------------------------------------------------------------------
-
-def mock_get_financials(ticker: str) -> dict:
-    return {"ticker": ticker.upper(), "sector": "Technology", "revenue": 500.0}
-
-
-def mock_run_dcf(financials: dict) -> dict:
-    ebitda = 100.0
-    return {
-        "ebitda": ebitda,
-        "fcf_projections": [60, 65, 70, 75, 80],
-        "enterprise_value": 650.0,
-        "equity_value": 600.0,
-        "exit_ebitda": 130.0,
-        "entry_multiple": 6.5,
-        "wacc": 0.09,
-        "terminal_growth": 0.025,
-    }
-
-
-def mock_find_peers(financials: dict) -> list:
-    return ["PEER1", "PEER2", "PEER3", "PEER4", "PEER5"]
-
-
-def mock_run_comps(financials: dict, peers: list) -> pd.DataFrame:
-    data = {
-        "Ticker": [financials["ticker"]] + peers,
-        "EV/EBITDA": [11.2, 10.5, 12.1, 9.8, 11.9, 10.7],
-        "P/E": [22.4, 20.1, 24.3, 18.9, 23.5, 21.0],
-        "EV/Sales": [3.1, 2.8, 3.4, 2.6, 3.2, 2.9],
-    }
-    return pd.DataFrame(data)
-
-
-# ---------------------------------------------------------------------------
-# PAGE CONFIG
-# ---------------------------------------------------------------------------
+from pipeline_real import run_pipeline
 
 st.set_page_config(page_title="Valuation Pipeline", layout="wide")
 st.title("DCF / Comps / LBO Valuation Pipeline")
 
-if MOCK_MODE:
-    st.warning(
-        "Running in MOCK MODE -- backend modules (get_financials, run_dcf, "
-        "run_comps, find_peers) aren't wired in yet. Numbers below are placeholders "
-        "to test the interface, not real company data.",
-        icon="⚠️",
-    )
+st.info(
+    "I've wired this to real data now (yfinance for tickers, the Claude API "
+    "for PDFs) instead of placeholders. If something errors out, please "
+    "screenshot it and send it back -- I haven't been able to test the "
+    "live data calls myself."
+)
 
 # ---------------------------------------------------------------------------
 # SIDEBAR -- INPUT
@@ -78,14 +40,20 @@ if MOCK_MODE:
 with st.sidebar:
     st.header("Input")
 
-    input_type = st.radio("Input type", ["Ticker", "PDF Upload"], horizontal=True)
+    input_type_choice = st.radio("Input type", ["Ticker", "PDF Upload"], horizontal=True)
 
-    if input_type == "Ticker":
+    if input_type_choice == "Ticker":
         company_input = st.text_input("Ticker symbol", value="AAPL")
         uploaded_pdf = None
+        api_key = None
     else:
         company_input = None
         uploaded_pdf = st.file_uploader("Upload financial statement (PDF)", type=["pdf"])
+        api_key = st.text_input(
+            "Your Anthropic API key (needed for PDF extraction)",
+            type="password",
+            help="From console.anthropic.com -- API Keys. Never shared or logged by this app.",
+        )
 
     st.divider()
     st.header("Analysis modes")
@@ -103,53 +71,8 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# MAIN -- ORCHESTRATION + DISPLAY
+# MAIN -- REAL PIPELINE CALL + DISPLAY
 # ---------------------------------------------------------------------------
-
-def run_pipeline_ui(company_input: str, modes: set, target_irr: float) -> dict:
-    """
-    My thin wrapper mirroring pipeline_orchestrator.run_pipeline's
-    dependency logic (dcf runs internally whenever lbo is selected, but I
-    only show it if explicitly requested) -- using mock functions for now.
-    """
-    results = {}
-    financials = None
-    dcf_result = None
-
-    needs_dcf_internally = "dcf" in modes or "lbo" in modes
-
-    if needs_dcf_internally:
-        financials = mock_get_financials(company_input)
-        dcf_result = mock_run_dcf(financials)
-        if "dcf" in modes:
-            results["dcf"] = dcf_result
-
-    if "comps" in modes:
-        if financials is None:
-            financials = mock_get_financials(company_input)
-        peers = mock_find_peers(financials)
-        results["comps"] = mock_run_comps(financials, peers)
-
-    if "lbo" in modes:
-        ebitda = dcf_result["ebitda"]
-        fcf_projections = dcf_result["fcf_projections"]
-        exit_ebitda = dcf_result["exit_ebitda"]
-        exit_multiple = dcf_result["entry_multiple"]
-        purchase_price = dcf_result["enterprise_value"]
-
-        structure = build_capital_structure(purchase_price, ebitda)
-        schedule = project_debt_schedule(
-            structure["senior_debt"], structure["sub_debt"],
-            structure["senior_rate"], structure["sub_rate"], fcf_projections,
-        )
-        returns = calculate_returns(structure["equity_check"], schedule, exit_ebitda, exit_multiple)
-
-        lbo_output = {"capital_structure": structure, "debt_schedule": schedule, "returns": returns}
-        results["lbo"] = lbo_output
-        results["financing_recommendation"] = recommend_financing(lbo_output, target_irr)
-
-    return results
-
 
 if run_button:
     modes = set()
@@ -162,61 +85,94 @@ if run_button:
 
     if not modes:
         st.error("Select at least one analysis mode in the sidebar.")
-    elif input_type == "Ticker" and not company_input:
+    elif input_type_choice == "Ticker" and not company_input:
         st.error("Enter a ticker symbol.")
-    elif input_type == "PDF Upload" and uploaded_pdf is None:
+    elif input_type_choice == "PDF Upload" and uploaded_pdf is None:
         st.error("Upload a PDF.")
+    elif input_type_choice == "PDF Upload" and not api_key:
+        st.error("Enter your Anthropic API key to process a PDF.")
     else:
-        target = company_input if input_type == "Ticker" else uploaded_pdf.name
-        results = run_pipeline_ui(target or "MOCK", modes, target_irr)
+        results = None
+        with st.spinner("Running analysis -- this calls real yfinance/Claude API data, so it may take a few seconds..."):
+            try:
+                if input_type_choice == "Ticker":
+                    results = run_pipeline(
+                        company_input, modes, input_type="ticker", target_irr=target_irr
+                    )
+                else:
+                    # I save the uploaded file to a temp path since my
+                    # pipeline expects a file path, not an in-memory object
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(uploaded_pdf.read())
+                        tmp_path = tmp.name
+                    results = run_pipeline(
+                        tmp_path, modes, input_type="pdf",
+                        target_irr=target_irr, anthropic_api_key=api_key,
+                    )
+            except Exception as e:
+                st.error(
+                    f"Something broke -- please screenshot this and send it "
+                    f"back to me so I can fix it:\n\n{type(e).__name__}: {e}"
+                )
 
-        tabs_needed = [m for m in ["dcf", "comps", "lbo"] if m in results]
-        if tabs_needed:
-            tabs = st.tabs([t.upper() for t in tabs_needed])
+        if results:
+            tabs_needed = [m for m in ["dcf", "comps", "lbo"] if m in results]
+            if tabs_needed:
+                tabs = st.tabs([t.upper() for t in tabs_needed])
 
-            for tab, mode in zip(tabs, tabs_needed):
-                with tab:
-                    if mode == "dcf":
-                        dcf = results["dcf"]
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Enterprise Value", f"£{dcf['enterprise_value']:.1f}m")
-                        col2.metric("Equity Value", f"£{dcf['equity_value']:.1f}m")
-                        col3.metric("WACC", f"{dcf['wacc']:.1%}")
-                        st.subheader("FCF Projections")
-                        fcf_df = pd.DataFrame({
-                            "Year": range(1, len(dcf["fcf_projections"]) + 1),
-                            "FCF (£m)": dcf["fcf_projections"],
-                        })
-                        st.bar_chart(fcf_df.set_index("Year"))
+                for tab, mode in zip(tabs, tabs_needed):
+                    with tab:
+                        if mode == "dcf":
+                            dcf = results["dcf"]
+                            col1, col2, col3 = st.columns(3)
+                            col1.metric("Enterprise Value", f"${dcf['enterprise_value']:,.1f}m")
+                            col2.metric("Equity Value", f"${dcf['equity_value']:,.1f}m")
+                            col3.metric("WACC", f"{dcf['wacc']:.1%}")
+                            st.subheader("FCF Projections")
+                            fcf_df = pd.DataFrame({
+                                "Year": range(1, len(dcf["fcf_projections"]) + 1),
+                                "FCF ($m)": dcf["fcf_projections"],
+                            })
+                            st.bar_chart(fcf_df.set_index("Year"))
+                            with st.expander("WACC / beta detail"):
+                                st.write(f"Beta used: {dcf.get('beta', 'N/A')}")
+                                st.write(f"Risk-free rate: {dcf.get('risk_free_rate', 'N/A')}")
+                                st.write(f"Market risk premium: {dcf.get('market_risk_premium', 'N/A')}")
 
-                    elif mode == "comps":
-                        st.subheader("Comparable Company Analysis")
-                        st.dataframe(results["comps"], use_container_width=True)
-                        st.caption("First row is the target company; remaining rows are identified peers.")
+                        elif mode == "comps":
+                            st.subheader("Comparable Company Analysis")
+                            comps_df = pd.DataFrame(results["comps"])
+                            rename_map = {
+                                "ticker": "Ticker", "ev_ebitda": "EV/EBITDA",
+                                "pe": "P/E", "ev_sales": "EV/Sales",
+                            }
+                            comps_df = comps_df.rename(columns=rename_map)
+                            st.dataframe(comps_df, use_container_width=True)
+                            st.caption("First row is the target company; remaining rows are identified peers.")
 
-                    elif mode == "lbo":
-                        lbo = results["lbo"]
-                        structure = lbo["capital_structure"]
-                        returns = lbo["returns"]
-                        rec = results["financing_recommendation"]
+                        elif mode == "lbo":
+                            lbo = results["lbo"]
+                            structure = lbo["capital_structure"]
+                            returns = lbo["returns"]
+                            rec = results["financing_recommendation"]
 
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("Total Debt", f"£{structure['total_debt']:.1f}m")
-                        col2.metric("Equity Check", f"£{structure['equity_check']:.1f}m")
-                        col3.metric("Leverage", f"{structure['leverage_multiple_used']:.2f}x")
-                        col4.metric("IRR", f"{returns['irr']:.1%}" if returns["irr"] else "N/A")
+                            col1, col2, col3, col4 = st.columns(4)
+                            col1.metric("Total Debt", f"${structure['total_debt']:,.1f}m")
+                            col2.metric("Equity Check", f"${structure['equity_check']:,.1f}m")
+                            col3.metric("Leverage", f"{structure['leverage_multiple_used']:.2f}x")
+                            col4.metric("IRR", f"{returns['irr']:.1%}" if returns["irr"] else "N/A")
 
-                        st.subheader("Debt Paydown Schedule")
-                        schedule_df = pd.DataFrame(lbo["debt_schedule"])
-                        st.dataframe(schedule_df, use_container_width=True)
+                            st.subheader("Debt Paydown Schedule")
+                            schedule_df = pd.DataFrame(lbo["debt_schedule"])
+                            st.dataframe(schedule_df, use_container_width=True)
 
-                        st.subheader("Financing Recommendation")
-                        badge_color = {
-                            "PROCEED": "green", "PROCEED_WITH_CAUTION": "orange",
-                            "RENEGOTIATE": "red", "REVIEW": "red",
-                        }.get(rec["recommendation"], "gray")
-                        st.markdown(f":{badge_color}[**{rec['recommendation']}**]")
-                        for note in rec["notes"]:
-                            st.write(f"- {note}")
+                            st.subheader("Financing Recommendation")
+                            badge_color = {
+                                "PROCEED": "green", "PROCEED_WITH_CAUTION": "orange",
+                                "RENEGOTIATE": "red", "REVIEW": "red",
+                            }.get(rec["recommendation"], "gray")
+                            st.markdown(f":{badge_color}[**{rec['recommendation']}**]")
+                            for note in rec["notes"]:
+                                st.write(f"- {note}")
 else:
     st.info("Configure your input and analysis modes in the sidebar, then click Run Analysis.")
