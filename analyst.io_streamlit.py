@@ -87,8 +87,15 @@ with st.sidebar:
     run_dcf_mode = st.checkbox("DCF Valuation", value=True)
     run_lbo_mode = st.checkbox("LBO / Financing", value=False)
 
+    if run_comps_mode:
+        n_peers = st.slider("Number of peer companies", 3, 20, 10)
+    else:
+        n_peers = 10
+
     if run_lbo_mode:
-        target_irr = st.slider("Target IRR (%)", 10, 35, 20) / 100
+        target_irr = st.slider("Target IRR (%)", 10, 100, 20) / 100
+        if target_irr >= 0.60:
+            st.caption("⚠️ Above ~60% is unconventional for a target IRR -- sanity-check your assumptions.")
     else:
         target_irr = 0.20
 
@@ -133,7 +140,7 @@ if run_button:
                 try:
                     if input_type_choice == "Ticker":
                         results = run_pipeline(
-                            company_input, modes, input_type="ticker", target_irr=target_irr
+                            company_input, modes, input_type="ticker", target_irr=target_irr, n_peers=n_peers
                         )
                     else:
                         # I save the uploaded file to a temp path since my
@@ -143,7 +150,7 @@ if run_button:
                             tmp_path = tmp.name
                         results = run_pipeline(
                             tmp_path, modes, input_type="pdf",
-                            target_irr=target_irr, anthropic_api_key=api_key,
+                            target_irr=target_irr, anthropic_api_key=api_key, n_peers=n_peers,
                         )
                 except Exception as e:
                     st.error(
@@ -160,57 +167,128 @@ if run_button:
                         with tab:
                             if mode == "dcf":
                                 dcf = results["dcf"]
-                                col1, col2, col3 = st.columns(3)
-                                col1.metric("Enterprise Value", format_currency(dcf['enterprise_value']))
-                                col2.metric("Equity Value", format_currency(dcf['equity_value']))
-                                col3.metric("WACC", f"{dcf['wacc']:.1%}")
-                                st.subheader("FCF Projections")
-                                fcf_df = pd.DataFrame({
-                                    "Year": range(1, len(dcf["fcf_projections"]) + 1),
-                                    "FCF": dcf["fcf_projections"],
-                                })
-                                st.bar_chart(fcf_df.set_index("Year"))
-                                with st.expander("WACC / beta detail"):
-                                    st.write(f"Beta used: {dcf.get('beta', 'N/A')}")
-                                    st.write(f"Risk-free rate: {dcf.get('risk_free_rate', 'N/A')}")
-                                    st.write(f"Market risk premium: {dcf.get('market_risk_premium', 'N/A')}")
+                                if not dcf.get("feasible", True):
+                                    st.warning(f"**Not feasible with these assumptions:** {dcf['reason']}")
+                                    st.subheader("Workings computed before hitting the issue")
+                                    st.write(f"WACC: {dcf['wacc']:.2%}  |  Terminal growth: {dcf['terminal_growth']:.2%}")
+                                    st.write(f"PV of explicit period (still valid): {format_currency(dcf['pv_explicit_period'])}")
+                                    fcf_df = pd.DataFrame({
+                                        "Year": range(1, len(dcf["fcf_projections"]) + 1),
+                                        "FCF": dcf["fcf_projections"],
+                                    })
+                                    st.subheader("FCF Projections (still valid)")
+                                    st.bar_chart(fcf_df.set_index("Year"))
+                                else:
+                                    col1, col2, col3 = st.columns(3)
+                                    col1.metric("Enterprise Value", format_currency(dcf['enterprise_value']))
+                                    col2.metric("Equity Value", format_currency(dcf['equity_value']))
+                                    col3.metric("WACC", f"{dcf['wacc']:.1%}")
+                                    st.subheader("FCF Projections")
+                                    fcf_df = pd.DataFrame({
+                                        "Year": range(1, len(dcf["fcf_projections"]) + 1),
+                                        "FCF": dcf["fcf_projections"],
+                                    })
+                                    st.bar_chart(fcf_df.set_index("Year"))
+                                    with st.expander("WACC / beta detail"):
+                                        st.write(f"Beta used: {dcf.get('beta', 'N/A')}")
+                                        st.write(f"Risk-free rate: {dcf.get('risk_free_rate', 'N/A')}")
+                                        st.write(f"Market risk premium: {dcf.get('market_risk_premium', 'N/A')}")
 
                             elif mode == "comps":
                                 st.subheader("Comparable Company Analysis")
-                                comps_df = pd.DataFrame(results["comps"])
+                                comps = results["comps"]
+                                comps_df = pd.DataFrame(comps["table"])
                                 rename_map = {
-                                    "ticker": "Ticker", "ev_ebitda": "EV/EBITDA",
-                                    "pe": "P/E", "ev_sales": "EV/Sales",
+                                    "company": "Company", "ticker": "Ticker",
+                                    "ev_ebitda": "EV/EBITDA", "pe": "P/E", "ev_sales": "EV/Sales",
                                 }
                                 comps_df = comps_df.rename(columns=rename_map)
+                                column_order = [c for c in ["Company", "Ticker", "EV/EBITDA", "P/E", "EV/Sales"] if c in comps_df.columns]
+                                comps_df = comps_df[column_order]
                                 st.dataframe(comps_df, use_container_width=True)
-                                st.caption("First row is the target company; remaining rows are identified peers.")
+                                st.caption(f"Row 1 is the target company; the other {len(comps['table'])-1} rows are identified peers.")
+
+                                st.subheader("Peer median / mean")
+                                stats = comps["peer_stats"]
+                                stat_cols = st.columns(3)
+                                labels = {"ev_ebitda": "EV/EBITDA", "pe": "P/E", "ev_sales": "EV/Sales"}
+                                for col, key in zip(stat_cols, ["ev_ebitda", "pe", "ev_sales"]):
+                                    median = stats[key]["median"]
+                                    mean = stats[key]["mean"]
+                                    col.metric(
+                                        f"{labels[key]} (median)",
+                                        f"{median:.2f}x" if median is not None else "N/A",
+                                    )
+                                    col.caption(f"Mean: {mean:.2f}x" if mean is not None else "Mean: N/A")
+
+                                st.subheader("Implied Valuation")
+                                st.caption("Peer multiple x this company's own EBITDA/revenue/net income")
+                                iv = comps["implied_valuation"]
+                                val_col1, val_col2, val_col3 = st.columns(3)
+                                val_col1.metric(
+                                    "EV from EV/EBITDA (median)",
+                                    format_currency(iv["ev_from_ebitda_median"]) if iv["ev_from_ebitda_median"] else "N/A",
+                                )
+                                val_col1.caption(
+                                    f"Mean: {format_currency(iv['ev_from_ebitda_mean'])}" if iv["ev_from_ebitda_mean"] else "Mean: N/A"
+                                )
+                                val_col2.metric(
+                                    "EV from EV/Sales (median)",
+                                    format_currency(iv["ev_from_sales_median"]) if iv["ev_from_sales_median"] else "N/A",
+                                )
+                                val_col2.caption(
+                                    f"Mean: {format_currency(iv['ev_from_sales_mean'])}" if iv["ev_from_sales_mean"] else "Mean: N/A"
+                                )
+                                val_col3.metric(
+                                    "Equity from P/E (median)",
+                                    format_currency(iv["equity_from_pe_median"]) if iv["equity_from_pe_median"] else "N/A",
+                                )
+                                val_col3.caption(
+                                    f"Mean: {format_currency(iv['equity_from_pe_mean'])}" if iv["equity_from_pe_mean"] else "Mean: N/A"
+                                )
 
                             elif mode == "lbo":
                                 lbo = results["lbo"]
-                                structure = lbo["capital_structure"]
-                                returns = lbo["returns"]
-                                rec = results["financing_recommendation"]
+                                if not lbo.get("returns", {}).get("feasible", lbo.get("feasible", True)):
+                                    rec = results["financing_recommendation"]
+                                    st.warning("**Not feasible:** " + rec["notes"][0])
+                                    if "returns" in lbo:
+                                        st.subheader("Workings: the cash flow stream that failed")
+                                        cash_flows = lbo["returns"]["cash_flows"]
+                                        cf_df = pd.DataFrame({
+                                            "Period": ["Initial equity"] + [f"Year {i}" for i in range(1, len(cash_flows))],
+                                            "Cash flow": cash_flows,
+                                        })
+                                        st.dataframe(cf_df, use_container_width=True)
+                                        structure = lbo["capital_structure"]
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("Total Debt", format_currency(structure['total_debt']))
+                                        col2.metric("Equity Check", format_currency(structure['equity_check']))
+                                        col3.metric("Leverage", f"{structure['leverage_multiple_used']:.2f}x")
+                                else:
+                                    structure = lbo["capital_structure"]
+                                    returns = lbo["returns"]
+                                    rec = results["financing_recommendation"]
 
-                                col1, col2, col3, col4 = st.columns(4)
-                                col1.metric("Total Debt", format_currency(structure['total_debt']))
-                                col2.metric("Equity Check", format_currency(structure['equity_check']))
-                                col3.metric("Leverage", f"{structure['leverage_multiple_used']:.2f}x")
-                                irr_val = returns.get("irr")
-                                irr_display = f"{irr_val:.1%}" if irr_val is not None and irr_val == irr_val else "N/A"
-                                col4.metric("IRR", irr_display)
+                                    col1, col2, col3, col4 = st.columns(4)
+                                    col1.metric("Total Debt", format_currency(structure['total_debt']))
+                                    col2.metric("Equity Check", format_currency(structure['equity_check']))
+                                    col3.metric("Leverage", f"{structure['leverage_multiple_used']:.2f}x")
+                                    irr_val = returns.get("irr")
+                                    irr_display = f"{irr_val:.1%}" if irr_val is not None and irr_val == irr_val else "N/A"
+                                    col4.metric("IRR", irr_display)
 
-                                st.subheader("Debt Paydown Schedule")
-                                schedule_df = pd.DataFrame(lbo["debt_schedule"])
-                                st.dataframe(schedule_df, use_container_width=True)
+                                    st.subheader("Debt Paydown Schedule")
+                                    schedule_df = pd.DataFrame(lbo["debt_schedule"])
+                                    st.dataframe(schedule_df, use_container_width=True)
 
-                                st.subheader("Financing Recommendation")
-                                badge_color = {
-                                    "PROCEED": "green", "PROCEED_WITH_CAUTION": "orange",
-                                    "RENEGOTIATE": "red", "REVIEW": "red",
-                                }.get(rec["recommendation"], "gray")
-                                st.markdown(f":{badge_color}[**{rec['recommendation']}**]")
-                                for note in rec["notes"]:
-                                    st.write(f"- {note}")
+                                    st.subheader("Financing Recommendation")
+                                    badge_color = {
+                                        "PROCEED": "green", "PROCEED_WITH_CAUTION": "orange",
+                                        "RENEGOTIATE": "red", "REVIEW": "red", "NOT_FEASIBLE": "red",
+                                    }.get(rec["recommendation"], "gray")
+                                    st.markdown(f":{badge_color}[**{rec['recommendation']}**]")
+                                    for note in rec["notes"]:
+                                        st.write(f"- {note}")
 else:
     st.info("Configure your input and analysis modes in the sidebar, then click Run Analysis.")
