@@ -74,6 +74,18 @@ def recommend_financing(lbo_output: dict, target_irr: float = 0.20) -> dict:
     notes = []
     recommendation = "PROCEED"
 
+    # Rule 0: is there even a valid IRR to evaluate? If not, I lead with
+    # that and the actual cash flow workings, rather than still running
+    # the other rules against a None IRR
+    if not returns.get("feasible", True):
+        return {
+            "recommendation": "NOT_FEASIBLE",
+            "binding_constraint": binding,
+            "leverage_used": leverage_used,
+            "irr": None,
+            "notes": [returns.get("reason", "IRR could not be computed for this deal structure.")],
+        }
+
     # Rule 1: which constraint bound, and what I think it implies
     if binding == "coverage":
         notes.append(
@@ -90,11 +102,8 @@ def recommend_financing(lbo_output: dict, target_irr: float = 0.20) -> dict:
             "stress-test the coverage ratio against a rate increase before finalising."
         )
 
-    # Rule 2: IRR vs target
-    if irr is None:
-        notes.append("IRR could not be computed (degenerate cash flow signs) -- review projections.")
-        recommendation = "REVIEW"
-    elif irr < target_irr:
+    # Rule 2: IRR vs target (we know irr is valid at this point -- Rule 0 already returned early otherwise)
+    if irr < target_irr:
         gap = target_irr - irr
         notes.append(
             f"IRR of {irr:.1%} misses the {target_irr:.1%} target by {gap:.1%}. "
