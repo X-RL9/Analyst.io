@@ -83,7 +83,16 @@ with st.sidebar:
 
     st.divider()
     st.header("Analysis modes")
-    run_comps_mode = st.checkbox("Comparable Company Analysis", value=True)
+    if input_type_choice == "PDF Upload":
+        st.caption(
+            "Comparable Company Analysis isn't available for PDF uploads -- "
+            "it needs sector/industry classification, which only comes from "
+            "a ticker lookup (yfinance), not from the financial statements "
+            "themselves."
+        )
+        run_comps_mode = False
+    else:
+        run_comps_mode = st.checkbox("Comparable Company Analysis", value=True)
     run_dcf_mode = st.checkbox("DCF Valuation", value=True)
     run_lbo_mode = st.checkbox("LBO / Financing", value=False)
 
