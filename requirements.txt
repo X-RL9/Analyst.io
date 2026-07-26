@@ -1,0 +1,7 @@
+streamlit
+pandas
+numpy<2.0
+scipy
+numpy-financial
+yfinance
+lxml
