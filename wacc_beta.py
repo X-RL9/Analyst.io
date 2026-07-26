@@ -172,6 +172,16 @@ def calculate_wacc(ebitda: float, financials: dict, beta: float, risk_free_rate:
 
     wacc = equity_weight * cost_of_equity + debt_weight * cost_of_debt * (1 - tax_rate)
 
+    # I check for NaN/inf here rather than letting a bad WACC silently flow
+    # into the DCF and surface three steps later as "$nanm" with no clue why
+    if wacc != wacc or wacc in (float("inf"), float("-inf")):  # wacc != wacc catches NaN
+        raise ValueError(
+            f"WACC calculation produced an invalid result ({wacc}). Inputs were: "
+            f"cost_of_equity={cost_of_equity}, cost_of_debt={cost_of_debt}, "
+            f"market_cap={market_cap}, total_debt={total_debt}, tax_rate={tax_rate}. "
+            "One of these is likely None/NaN -- check the financials dict."
+        )
+
     return {
         "wacc": wacc, "cost_of_equity": cost_of_equity, "cost_of_debt": cost_of_debt,
         "equity_weight": equity_weight, "debt_weight": debt_weight, "beta_used": beta,
