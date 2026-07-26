@@ -278,10 +278,35 @@ def find_peers(financials: dict, n_peers: int = 10) -> list:
 # COMPS -- I pull EV/EBITDA, P/E, EV/Sales for target + peers
 # ===========================================================================
 
-def run_comps(financials: dict, peers: list) -> list:
+def run_comps(financials: dict, peers: list) -> dict:
     """
-    I pull the standard trading multiples for the target + each peer.
-    I have NOT tested this -- please verify the field names in Colab.
+    I pull the standard trading multiples for the target + each peer, then
+    compute peer median/mean for each multiple, and use those to derive
+    an ACTUAL implied valuation for the target -- median/mean EV/EBITDA x
+    target's own EBITDA, median/mean EV/Sales x target's own revenue,
+    median/mean P/E x target's own net income. Without this last step, a
+    comps table is just numbers with no conclusion -- the whole point of
+    a CCA is to answer "so what's this company worth, based on how the
+    market prices similar companies?"
+
+    I use median (not just mean) throughout since a couple of extreme
+    peer multiples can otherwise skew the implied value -- same reasoning
+    as the peer-median beta fallback elsewhere in this project.
+
+    Returns:
+      {
+        "table": [ {ticker, company, ev_ebitda, pe, ev_sales}, ... ]
+                 (target company is always row 0),
+        "peer_stats": {"ev_ebitda": {"median":.., "mean":..}, "pe": {...}, "ev_sales": {...}},
+        "implied_valuation": {
+            "ev_from_ebitda_median": .., "ev_from_ebitda_mean": ..,
+            "ev_from_sales_median": .., "ev_from_sales_mean": ..,
+            "equity_from_pe_median": .., "equity_from_pe_mean": ..,
+        }
+      }
+
+    I have NOT tested the yfinance calls live -- please verify the field
+    names in Colab.
     """
     all_tickers = [financials["ticker"]] + peers
     rows = []
@@ -289,6 +314,7 @@ def run_comps(financials: dict, peers: list) -> list:
     for ticker in all_tickers:
         try:
             info = yf.Ticker(ticker).info
+            company_name = info.get("longName") or info.get("shortName") or ticker
             ev = info.get("enterpriseValue")
             ebitda = info.get("ebitda")
             pe = info.get("trailingPE")
@@ -302,14 +328,67 @@ def run_comps(financials: dict, peers: list) -> list:
 
             rows.append({
                 "ticker": ticker,
+                "company": company_name,
                 "ev_ebitda": ev_ebitda,
                 "pe": pe,
                 "ev_sales": ev / revenue if ev and revenue else None,
             })
         except Exception:
-            rows.append({"ticker": ticker, "ev_ebitda": None, "pe": None, "ev_sales": None})
+            rows.append({"ticker": ticker, "company": ticker, "ev_ebitda": None, "pe": None, "ev_sales": None})
 
-    return rows
+    # I compute peer stats from PEERS ONLY (rows[1:]), excluding the target
+    # itself -- the target's own multiple isn't a data point for what the
+    # market pays for similar companies, it's the thing we're trying to
+    # figure out
+    def _clean(values):
+        return [v for v in values if v is not None and v == v]  # drop None and NaN
+
+    peer_rows = rows[1:]
+    ev_ebitda_vals = _clean([r["ev_ebitda"] for r in peer_rows])
+    pe_vals = _clean([r["pe"] for r in peer_rows])
+    ev_sales_vals = _clean([r["ev_sales"] for r in peer_rows])
+
+    def _median_mean(values):
+        if not values:
+            return {"median": None, "mean": None}
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        median = sorted_vals[n // 2] if n % 2 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+        return {"median": median, "mean": sum(values) / len(values)}
+
+    peer_stats = {
+        "ev_ebitda": _median_mean(ev_ebitda_vals),
+        "pe": _median_mean(pe_vals),
+        "ev_sales": _median_mean(ev_sales_vals),
+    }
+
+    # THE ACTUAL VALUATION: peer multiple x target's own fundamentals
+    target_ebitda = financials.get("ebitda")
+    target_revenue = financials.get("revenue")
+    target_net_income = financials.get("net_income")
+
+    def _implied(multiple_stats, target_fundamental):
+        if target_fundamental is None:
+            return {"median": None, "mean": None}
+        return {
+            "median": multiple_stats["median"] * target_fundamental if multiple_stats["median"] is not None else None,
+            "mean": multiple_stats["mean"] * target_fundamental if multiple_stats["mean"] is not None else None,
+        }
+
+    ev_from_ebitda = _implied(peer_stats["ev_ebitda"], target_ebitda)
+    ev_from_sales = _implied(peer_stats["ev_sales"], target_revenue)
+    equity_from_pe = _implied(peer_stats["pe"], target_net_income)  # P/E x net income = equity value directly
+
+    implied_valuation = {
+        "ev_from_ebitda_median": ev_from_ebitda["median"],
+        "ev_from_ebitda_mean": ev_from_ebitda["mean"],
+        "ev_from_sales_median": ev_from_sales["median"],
+        "ev_from_sales_mean": ev_from_sales["mean"],
+        "equity_from_pe_median": equity_from_pe["median"],
+        "equity_from_pe_mean": equity_from_pe["mean"],
+    }
+
+    return {"table": rows, "peer_stats": peer_stats, "implied_valuation": implied_valuation}
 
 
 if __name__ == "__main__":
