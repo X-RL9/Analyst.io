@@ -256,7 +256,14 @@ def find_peers(financials: dict, n_peers: int = 10) -> list:
     target_revenue = financials.get("revenue")
 
     if not sector or not industry:
-        raise ValueError("financials must include 'sector' and 'industry' to find peers")
+        raise ValueError(
+            "Comparable Company Analysis needs sector/industry classification "
+            "to find peers, but this data doesn't have it. This happens when "
+            "the company info came from a PDF upload -- PDFs don't contain "
+            "sector/industry classification anywhere in the financial "
+            "statements themselves (that's a yfinance/ticker-lookup-only "
+            "field). Comps only works with the Ticker input path for now."
+        )
 
     query = EquityQuery("and", [
         EquityQuery("eq", ["sector", sector]),
