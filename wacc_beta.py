@@ -18,21 +18,58 @@ import statsmodels.api as sm
 import yfinance as yf
 
 
+def _get_close_series(price_data: pd.DataFrame, ticker: str) -> pd.Series:
+    """
+    I pull out the Close column as a clean Series. Newer yfinance versions
+    sometimes return MultiIndex columns even for a single ticker, so
+    price_data["Close"] can come back as a DataFrame instead of a Series --
+    I handle that here rather than letting it silently break downstream math.
+    """
+    close = price_data["Close"]
+    if isinstance(close, pd.DataFrame):
+        if ticker in close.columns:
+            close = close[ticker]
+        else:
+            close = close.iloc[:, 0]  # fall back to the first (only) column
+    return close
+
+
 def calculate_beta(ticker: str, market_index: str = "^GSPC", period: str = "5y") -> float:
     """
     I calculate beta via OLS regression of stock returns on market returns.
     THIS NEEDS LIVE DATA -- please run it in Colab; I haven't been able to
     test it myself (no yfinance network access in my sandbox).
+
+    Bug I found and fixed after your first real run: plain .dropna() does
+    NOT remove inf values, only NaN -- so a single bad data point (a stock
+    split, a delisting gap, a zero-price glitch) could slip through and
+    crash the regression with a LinAlgError. I now explicitly replace
+    inf/-inf with NaN before dropping.
     """
-    stock_data = yf.download(ticker, period=period, interval="1wk", progress=False)
-    market_data = yf.download(market_index, period=period, interval="1wk", progress=False)
+    stock_data = yf.download(ticker, period=period, interval="1wk", progress=False, auto_adjust=True)
+    market_data = yf.download(market_index, period=period, interval="1wk", progress=False, auto_adjust=True)
 
-    stock_returns = stock_data["Close"].pct_change().dropna()
-    market_returns = market_data["Close"].pct_change().dropna()
+    if stock_data.empty or market_data.empty:
+        raise ValueError(f"yfinance returned no price data for {ticker} or {market_index}")
 
-    # I align on matching dates
-    aligned = pd.concat([stock_returns, market_returns], axis=1, join="inner").dropna()
+    stock_close = _get_close_series(stock_data, ticker)
+    market_close = _get_close_series(market_data, market_index)
+
+    stock_returns = stock_close.pct_change()
+    market_returns = market_close.pct_change()
+
+    aligned = pd.concat([stock_returns, market_returns], axis=1, join="inner")
     aligned.columns = ["stock", "market"]
+    # THE FIX: I replace inf/-inf with NaN BEFORE dropna, since dropna alone
+    # leaves inf values in place and that's what crashed the regression
+    aligned = aligned.replace([np.inf, -np.inf], np.nan).dropna()
+
+    if len(aligned) < 10:
+        raise ValueError(
+            f"Only {len(aligned)} clean overlapping data points found for "
+            f"{ticker} vs {market_index} -- not enough to regress beta "
+            "reliably. Check the ticker is correct and has enough trading history."
+        )
 
     X = sm.add_constant(aligned["market"])
     model = sm.OLS(aligned["stock"], X).fit()
@@ -61,9 +98,12 @@ def calculate_market_risk_premium(risk_free_rate: float, period: str = "1y") -> 
     since beta already scales the market premium).
     THIS NEEDS LIVE DATA -- please run it in Colab.
     """
-    market_data = yf.download("^GSPC", period=period, progress=False)
-    start_price = market_data["Close"].iloc[0]
-    end_price = market_data["Close"].iloc[-1]
+    market_data = yf.download("^GSPC", period=period, progress=False, auto_adjust=True)
+    if market_data.empty:
+        raise ValueError("yfinance returned no price data for ^GSPC")
+    close = _get_close_series(market_data, "^GSPC")
+    start_price = close.iloc[0]
+    end_price = close.iloc[-1]
     market_return = (end_price / start_price) - 1
     return float(market_return - risk_free_rate)
 
