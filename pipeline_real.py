@@ -69,7 +69,8 @@ def run_full_dcf(financials: dict) -> dict:
 
 
 def run_pipeline(company_input: str, modes: set, input_type: str = "ticker",
-                  target_irr: float = 0.20, anthropic_api_key: str = None) -> dict:
+                  target_irr: float = 0.20, anthropic_api_key: str = None,
+                  n_peers: int = 10) -> dict:
     """
     I use the same mode-selection contract as pipeline_core.py's version:
     modes = any non-empty subset of {"comps", "dcf", "lbo"}.
@@ -92,23 +93,37 @@ def run_pipeline(company_input: str, modes: set, input_type: str = "ticker",
     if "comps" in modes:
         if financials is None:
             financials = get_financials(company_input, input_type, anthropic_api_key)
-        peers = find_peers(financials)
+        peers = find_peers(financials, n_peers=n_peers)
         results["comps"] = run_comps(financials, peers)
 
     if "lbo" in modes:
-        ebitda = dcf_result["ebitda"]
-        fcf_projections = dcf_result["fcf_projections"]
-        exit_ebitda = dcf_result["exit_ebitda"]
-        exit_multiple = dcf_result["entry_multiple"]
-        purchase_price = dcf_result["enterprise_value"]
+        if not dcf_result.get("feasible", True):
+            # LBO needs enterprise_value/exit_ebitda from the DCF -- if the
+            # DCF itself was infeasible (e.g. WACC <= terminal growth),
+            # there's nothing valid to build an LBO on top of. I surface
+            # that clearly rather than crashing on a None enterprise_value.
+            results["lbo"] = {"feasible": False}
+            results["financing_recommendation"] = {
+                "recommendation": "NOT_FEASIBLE",
+                "notes": [
+                    "LBO can't be built because the underlying DCF was infeasible: "
+                    + dcf_result.get("reason", "enterprise value could not be computed.")
+                ],
+            }
+        else:
+            ebitda = dcf_result["ebitda"]
+            fcf_projections = dcf_result["fcf_projections"]
+            exit_ebitda = dcf_result["exit_ebitda"]
+            exit_multiple = dcf_result["entry_multiple"]
+            purchase_price = dcf_result["enterprise_value"]
 
-        structure = build_capital_structure(purchase_price, ebitda)
-        schedule = project_debt_schedule(structure["senior_debt"], structure["sub_debt"],
-                                          structure["senior_rate"], structure["sub_rate"], fcf_projections)
-        returns = calculate_returns(structure["equity_check"], schedule, exit_ebitda, exit_multiple)
+            structure = build_capital_structure(purchase_price, ebitda)
+            schedule = project_debt_schedule(structure["senior_debt"], structure["sub_debt"],
+                                              structure["senior_rate"], structure["sub_rate"], fcf_projections)
+            returns = calculate_returns(structure["equity_check"], schedule, exit_ebitda, exit_multiple)
 
-        results["lbo"] = {"capital_structure": structure, "debt_schedule": schedule, "returns": returns}
-        results["financing_recommendation"] = recommend_financing(structure, returns, target_irr)
+            results["lbo"] = {"capital_structure": structure, "debt_schedule": schedule, "returns": returns}
+            results["financing_recommendation"] = recommend_financing(results["lbo"], target_irr)
 
     return results
 
