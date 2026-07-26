@@ -102,6 +102,15 @@ def calculate_market_risk_premium(risk_free_rate: float, period: str = "1y") -> 
     if market_data.empty:
         raise ValueError("yfinance returned no price data for ^GSPC")
     close = _get_close_series(market_data, "^GSPC")
+    # THE FIX: I drop NaN rows before indexing the first/last price. yfinance
+    # can include a leading or trailing NaN row (e.g. an incomplete "today"
+    # row if markets haven't closed yet, or an edge date with no trades) --
+    # if .iloc[0] or .iloc[-1] happens to land on that row, start_price or
+    # end_price becomes NaN and poisons everything downstream (cost of
+    # equity, WACC, enterprise value) with NaN, silently, no crash.
+    close = close.dropna()
+    if close.empty:
+        raise ValueError("^GSPC price data was all NaN after cleaning -- check yfinance connectivity")
     start_price = close.iloc[0]
     end_price = close.iloc[-1]
     market_return = (end_price / start_price) - 1
@@ -120,8 +129,11 @@ def estimate_beta_and_premium_from_peers(peer_tickers: list, risk_free_rate: flo
     for peer in peer_tickers:
         try:
             betas.append(calculate_beta(peer))
-            hist = yf.download(peer, period="1y", progress=False)["Close"]
-            returns.append((hist.iloc[-1] / hist.iloc[0]) - 1)
+            hist = yf.download(peer, period="1y", progress=False, auto_adjust=True)
+            close = _get_close_series(hist, peer).dropna()  # same NaN-row fix as calculate_market_risk_premium
+            if close.empty:
+                continue
+            returns.append((close.iloc[-1] / close.iloc[0]) - 1)
         except Exception:
             continue  # I skip peers with bad/missing data rather than failing the whole calc
 
