@@ -204,16 +204,30 @@ def get_financials(company_input: str, input_type: str = "ticker",
 
 def find_peers(financials: dict, n_peers: int = 10) -> list:
     """
-    I use yfinance's EquityQuery screener (I confirmed this exists via my
+    Uses yfinance's EquityQuery screener (I confirmed this exists via my
     docs search earlier) to get all tickers in the same sector+industry,
     then I rank by closest revenue and take the top n_peers -- not a fixed
     tolerance band, so this self-adjusts for small-cap vs mega-cap targets,
     as you suggested.
 
-    I have NOT tested this -- yfinance screener behavior (exact field
-    names for industry/sector filtering) needs verification in Colab; the
-    GitHub issues I found earlier showed some version-dependent quirks
-    combining sector+industry filters.
+    Fixes I made after seeing real output for AAPL come back with garbage
+    peers (XIAOMI80.BK, DIXON.NS, CSIOY etc.):
+      1. I restrict to major US exchanges (NMS, NYQ) -- without this, the
+         screener returns every cross-listing of the same underlying
+         company on every exchange worldwide (Bangkok, Frankfurt, Bombay
+         ADRs etc.), which isn't what "comparable companies" means for a
+         standard CCA.
+      2. I dedupe by the company's actual name (longName), not just
+         ticker -- this catches same-company cross-listings the exchange
+         filter alone might miss (e.g. an ADR that still trades on NMS).
+      3. I filter out negative-EBITDA companies -- these produce
+         meaningless multiples (like -0.10x EV/EBITDA) that don't tell you
+         anything comparable about valuation; a distressed/loss-making
+         company isn't a useful comp regardless of sector match.
+
+    NOT TESTED against live data -- please run in Colab and tell me if
+    the peer list looks sensible now (e.g. AAPL should surface names like
+    MSFT, GOOGL, not obscure cross-listings).
     """
     sector = financials.get("sector")
     industry = financials.get("industry")
@@ -225,21 +239,31 @@ def find_peers(financials: dict, n_peers: int = 10) -> list:
     query = EquityQuery("and", [
         EquityQuery("eq", ["sector", sector]),
         EquityQuery("eq", ["industry", industry]),
+        EquityQuery("is-in", ["exchange", "NMS", "NYQ"]),  # major US exchanges only
     ])
 
     results = yf.screen(query, size=250)  # 250 is Yahoo's max per call
     candidates = results.get("quotes", [])
 
+    seen_names = set()
     candidate_revenues = []
     for c in candidates:
         candidate_ticker = c.get("symbol")
         if candidate_ticker == financials.get("ticker"):
             continue  # I don't include the target itself as its own peer
+
         try:
             candidate_info = yf.Ticker(candidate_ticker).info
+            candidate_name = candidate_info.get("longName") or candidate_info.get("shortName") or candidate_ticker
+            if candidate_name in seen_names:
+                continue  # I skip cross-listings of a company I've already included
+            candidate_ebitda = candidate_info.get("ebitda")
+            if candidate_ebitda is not None and candidate_ebitda <= 0:
+                continue  # I skip distressed/loss-making companies -- meaningless multiples
             candidate_revenue = candidate_info.get("totalRevenue")
             if candidate_revenue:
                 candidate_revenues.append((candidate_ticker, candidate_revenue))
+                seen_names.add(candidate_name)
         except Exception:
             continue  # I skip tickers with unavailable data rather than failing entirely
 
@@ -270,9 +294,15 @@ def run_comps(financials: dict, peers: list) -> list:
             pe = info.get("trailingPE")
             revenue = info.get("totalRevenue")
 
+            # I flag negative EV/EBITDA as None rather than showing a
+            # meaningless negative multiple (this happens for companies
+            # with negative EBITDA -- the ratio itself is not interpretable
+            # as a valuation multiple in that case)
+            ev_ebitda = ev / ebitda if ev and ebitda and ebitda > 0 else None
+
             rows.append({
                 "ticker": ticker,
-                "ev_ebitda": ev / ebitda if ev and ebitda else None,
+                "ev_ebitda": ev_ebitda,
                 "pe": pe,
                 "ev_sales": ev / revenue if ev and revenue else None,
             })
