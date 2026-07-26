@@ -5,3 +5,6 @@ scipy
 numpy-financial
 yfinance
 lxml
+statsmodels
+pdfplumber
+anthropic
