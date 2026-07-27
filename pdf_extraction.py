@@ -63,6 +63,43 @@ def find_statement_page(pdf, statement_type: str):
     return None
 
 
+def build_extraction_prompt(statement_text: dict) -> str:
+    """
+    Stage 2 prompt: I ask Claude to return ONLY JSON matching the exact
+    schema pipeline_core.py's get_financials()/run_dcf() expect, so the
+    PDF path and the yfinance path produce interchangeable output.
+    """
+    combined_text = "\n\n---\n\n".join(
+        f"{key.upper()}:\n{text}" for key, text in statement_text.items() if text
+    )
+
+    return f"""You are extracting financial data from a company's 10-K filing.
+Below are the three core financial statements (income statement, balance
+sheet, cash flow statement). Extract the following fields and return
+ONLY a JSON object -- no markdown fences, no preamble, no explanation.
+
+Required fields (use the MOST RECENT fiscal year in the document; use
+null for any field genuinely not present in the text below):
+{{
+  "ticker": string or null (company name if ticker not shown),
+  "revenue": number (in millions),
+  "operating_income": number,
+  "net_income": number,
+  "ebitda": number or null (operating_income + D&A if D&A is shown, else null),
+  "cash_from_operations": number,
+  "capex": number (Purchases of property and equipment, as a positive number),
+  "free_cash_flow": number (cash_from_operations minus capex),
+  "total_debt": number (long-term debt + current portion, face value if shown),
+  "cash_and_equivalents": number,
+  "shares_outstanding": number (in millions, diluted if available),
+  "fiscal_year_end": string (e.g. "2025-12-31")
+}}
+
+FINANCIAL STATEMENTS:
+{combined_text}
+"""
+
+
 def extract_statement_text(pdf_path: str) -> dict:
     """
     I pull the raw text of the three core financial statements from a
