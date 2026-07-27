@@ -79,25 +79,36 @@ def calculate_market_risk_premium(risk_free_rate: float, period: str = "1y") -> 
     return float(market_return - risk_free_rate)
 
 
-def estimate_beta_and_premium_from_peers(peer_tickers: list, risk_free_rate: float) -> dict:
-    betas, returns = [], []
+def estimate_beta_from_peers(peer_tickers: list) -> float:
+    """
+    Fallback for unlisted/PDF-uploaded companies: MEDIAN (not mean) beta
+    of comparable public companies, since one distressed/outlier peer
+    could otherwise skew a mean badly.
+
+    IMPORTANT: this only estimates beta, not market risk premium. An
+    earlier version of this function also derived "market_risk_premium"
+    from the peers' own median stock return -- that was conceptually
+    wrong. Market risk premium has to be a broad-market quantity (market
+    return minus risk-free, e.g. from calculate_market_risk_premium()
+    using the S&P 500) -- using an individual peer group's realized
+    return instead means a bad year for that specific peer group produces
+    a deeply negative "premium," and since beta scales it, cost_of_equity
+    (and WACC) can blow out negative. Beta is legitimately company-
+    specific and needs a peer proxy when the target is unlisted; the
+    market risk premium is market-wide and doesn't -- it should be
+    computed the same way regardless of whether the target is listed.
+    """
+    betas = []
     for peer in peer_tickers:
         try:
             betas.append(calculate_beta(peer))
-            hist = yf.download(peer, period="1y", progress=False, auto_adjust=True)
-            close = _get_close_series(hist, peer).dropna()
-            if close.empty:
-                continue
-            returns.append((close.iloc[-1] / close.iloc[0]) - 1)
         except Exception:
             continue
 
     if not betas:
-        raise ValueError("Could not calculate beta/premium from any peer -- check peer_tickers list")
+        raise ValueError("Could not calculate beta from any peer -- check peer_tickers list")
 
-    median_beta = float(np.median(betas))
-    median_return = float(np.median(returns))
-    return {"beta": median_beta, "market_risk_premium": median_return - risk_free_rate}
+    return float(np.median(betas))
 
 
 def estimate_capital_weights_from_peers(peer_tickers: list) -> dict:
