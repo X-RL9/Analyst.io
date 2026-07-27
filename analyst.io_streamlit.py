@@ -59,10 +59,7 @@ st.set_page_config(page_title="Analyst.io", layout="wide")
 st.title("Analyst.io")
 
 st.info(
-    "I've wired this to real data now (yfinance for tickers, the Claude API "
-    "for PDFs) instead of placeholders. If something errors out, please "
-    "screenshot it and send it back -- I haven't been able to test the "
-    "live data calls myself."
+    "Input a ticker or upload a company's 10-k, then select which models you would like to review"
 )
 
 # ---------------------------------------------------------------------------
