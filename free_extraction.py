@@ -51,7 +51,12 @@ def extract_financials_free(pdf_path: str) -> dict:
     balance = statement_text.get("balance_sheet", "") or ""
     cash_flow = statement_text.get("cash_flow", "") or ""
 
-    revenue = _latest(income, "Total net sales") or _latest(income, "Total revenue") or _latest(income, "Net sales")
+    revenue = (
+        _latest(income, "Total net sales")
+        or _latest(income, "Total revenue")
+        or _latest(income, "Net sales")
+        or _latest(income, "Revenue")
+    )
     operating_income = (
         _latest(income, "Operating income")
         or _latest(income, "Income from operations")
