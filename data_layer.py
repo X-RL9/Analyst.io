@@ -217,9 +217,26 @@ def get_financials(company_input: str, input_type: str = "ticker",
         raise ValueError(f"input_type must be 'ticker' or 'pdf', got {input_type!r}")
 
 
+def _normalize_industry(industry: str) -> str:
+    """
+    yfinance's Ticker.info returns industry using a hyphen with spaces
+    around it (e.g. "Software - Application"), but the SAME library's
+    screener (EquityQuery) validates industry against a DIFFERENT format
+    -- an em dash with no spaces (e.g. "Software—Application"). Same
+    underlying category, two different naming conventions used by two
+    different parts of Yahoo's API. Without this, find_peers() failed
+    with "Invalid EQ value" for ANY ticker whose industry has a compound
+    name, regardless of whether the industry came from a live ticker
+    lookup or a manual PDF dropdown selection.
+    """
+    if industry is None:
+        return industry
+    return industry.replace(" - ", "—")
+
+
 def find_peers(financials: dict, n_peers: int = 10) -> list:
     sector = financials.get("sector")
-    industry = financials.get("industry")
+    industry = _normalize_industry(financials.get("industry"))
     target_revenue = financials.get("revenue")
 
     if not sector or not industry:
