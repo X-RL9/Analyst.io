@@ -155,16 +155,17 @@ def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str = None,
     result["sector"] = manual_sector
     result["industry"] = manual_industry
 
-    # Validate the fields the DCF absolutely cannot function without --
-    # same pattern as get_financials_from_ticker's validation. Without
-    # this, a genuinely missing field (an unusual filer's label wording
-    # slipping past every fallback in free_extraction.py) surfaces as a
-    # raw TypeError three steps downstream in dcf_engine.py instead of a
-    # clear, actionable message. total_debt is deliberately excluded --
-    # free_extraction.py already treats a missing debt line as a
+    # Validate the fields the DCF and Comps absolutely cannot function
+    # without -- same pattern as get_financials_from_ticker's validation.
+    # Without this, a genuinely missing field (an unusual filer's label
+    # wording slipping past every fallback in free_extraction.py) surfaces
+    # as a raw TypeError three steps downstream (either in dcf_engine.py's
+    # net_debt calc, or in find_peers()'s revenue-distance sort) instead
+    # of a clear, actionable message. total_debt is deliberately excluded
+    # -- free_extraction.py already treats a missing debt line as a
     # legitimate zero, not a failure.
-    required_for_dcf = ["free_cash_flow", "cash_and_equivalents", "ebitda"]
-    missing = [f for f in required_for_dcf if result.get(f) is None]
+    required_fields = ["revenue", "free_cash_flow", "cash_and_equivalents", "ebitda"]
+    missing = [f for f in required_fields if result.get(f) is None]
     if missing:
         raise ValueError(
             f"Could not extract these required field(s) from the PDF: {missing}. "
