@@ -7,7 +7,7 @@ but calling REAL functions instead of mocks.
 
 from data_layer import get_financials, find_peers, run_comps
 from wacc_beta import calculate_beta, get_risk_free_rate, calculate_market_risk_premium, \
-    estimate_beta_and_premium_from_peers, calculate_wacc
+    estimate_beta_and_premium_from_peers, estimate_capital_weights_from_peers, calculate_wacc
 from dcf_engine import run_dcf_real
 from lbo_financing import build_capital_structure, project_debt_schedule, calculate_returns
 from pipeline_orchestrator import recommend_financing
@@ -23,9 +23,16 @@ def run_full_dcf(financials: dict) -> dict:
     get_financials) even when the user only wants DCF -- calculate_beta()
     always fails for ticker="PDF_UPLOAD", so this fallback always fires
     for PDF input, and find_peers() always needs sector/industry.
+
+    Same reasoning extends one step further: a PDF also has no market_cap
+    (no live share price), so I reuse the SAME peer list to estimate a
+    peer-median capital structure (debt/(debt+equity)) via
+    estimate_capital_weights_from_peers(), and pass that into calculate_wacc
+    as a fallback for the equity/debt weighting.
     """
     risk_free_rate = get_risk_free_rate()
     market_risk_premium = calculate_market_risk_premium(risk_free_rate)
+    peer_capital_weights = None
 
     ticker = financials.get("ticker")
     try:
@@ -35,9 +42,12 @@ def run_full_dcf(financials: dict) -> dict:
         fallback = estimate_beta_and_premium_from_peers(peers, risk_free_rate)
         beta = fallback["beta"]
         market_risk_premium = fallback["market_risk_premium"]
+        if financials.get("market_cap") is None:
+            peer_capital_weights = estimate_capital_weights_from_peers(peers)
 
     wacc_result = calculate_wacc(financials["ebitda"], financials, beta,
-                                  risk_free_rate, market_risk_premium)
+                                  risk_free_rate, market_risk_premium,
+                                  peer_capital_weights)
 
     dcf_result = run_dcf_real(financials, wacc_result)
     dcf_result["beta"] = beta
