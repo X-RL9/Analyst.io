@@ -123,6 +123,18 @@ def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str = None,
     (industry_options.PDF_INDUSTRY_OPTIONS) and I attach it here exactly
     as if it had come from yfinance -- this is what lets find_peers() and
     Comparable Company Analysis work for PDF uploads.
+
+    UNIT FIX: a 10-K reports every dollar figure "in millions" -- so
+    free_extraction.py (correctly) parses revenue as e.g. 716924, meaning
+    $716,924 million. But get_financials_from_ticker() returns RAW DOLLAR
+    figures from yfinance (e.g. Apple's revenue comes back as
+    391000000000, not 391000). Those two units never matched, which
+    silently understated every PDF-derived DCF/comps figure by exactly
+    1,000,000x -- Amazon's real ~$70,577M enterprise value was displaying
+    as "$70,577" (seventy-thousand dollars) since format_currency's B/M
+    scaling assumed raw dollars. I scale every dollar- and share-
+    denominated field here so the PDF path matches the ticker path's
+    units from this point on, regardless of which extractor produced it.
     """
     if anthropic_api_key:
         result = get_financials_from_pdf_api(pdf_path, anthropic_api_key)
@@ -130,6 +142,15 @@ def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str = None,
         from free_extraction import extract_financials_free
         result = extract_financials_free(pdf_path)
         result["ticker"] = "PDF_UPLOAD"
+
+    dollar_and_share_fields = [
+        "revenue", "operating_income", "net_income", "ebitda",
+        "cash_from_operations", "capex", "free_cash_flow", "total_debt",
+        "cash_and_equivalents", "interest_expense", "shares_outstanding",
+    ]
+    for field in dollar_and_share_fields:
+        if result.get(field) is not None:
+            result[field] = result[field] * 1_000_000
 
     result["sector"] = manual_sector
     result["industry"] = manual_industry
