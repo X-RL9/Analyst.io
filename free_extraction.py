@@ -52,7 +52,13 @@ def extract_financials_free(pdf_path: str) -> dict:
     cash_flow = statement_text.get("cash_flow", "") or ""
 
     revenue = _latest(income, "Total net sales") or _latest(income, "Total revenue") or _latest(income, "Net sales")
-    operating_income = _latest(income, "Operating income")
+    operating_income = (
+        _latest(income, "Operating income")
+        or _latest(income, "Income from operations")
+        or _latest(income, "Loss from operations")
+        or _latest(income, "Operating loss")
+        or _latest(income, "Income (loss) from operations")
+    )
     net_income = _latest(income, "Net income")
     interest_expense_raw = _latest(income, "Interest expense")
     interest_expense = abs(interest_expense_raw) if interest_expense_raw is not None else None
@@ -63,7 +69,12 @@ def extract_financials_free(pdf_path: str) -> dict:
     )
     capex_raw = _latest(cash_flow, "Purchases of property and equipment")
     capex = abs(capex_raw) if capex_raw is not None else None
-    d_and_a = _latest(cash_flow, "Depreciation and amortization")
+    d_and_a = (
+        _latest(cash_flow, "Depreciation and amortization")
+        or _latest(cash_flow, "Depreciation and amortization expense")
+        or _latest(cash_flow, "Depreciation, amortization and accretion")
+        or _latest(cash_flow, "Depreciation and amortization of property and equipment")
+    )
 
     cash_and_equivalents = (
         _latest(balance, "Cash and cash equivalents")
