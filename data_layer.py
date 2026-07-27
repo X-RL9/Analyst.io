@@ -3,18 +3,6 @@ data_layer.py
 =============
 Real implementations of get_financials, find_peers, and run_comps --
 I've replaced every mock from pipeline_core.py with these.
-
-A note on my testing status:
-  I cannot execute yfinance calls from my sandbox (network restrictions
-  on my end). I've written every function below to the best of my
-  knowledge of the yfinance API (I confirmed the screener functionality
-  via docs search earlier in this project), but you need to be the one
-  to actually run these in Colab and confirm they work -- please tell me
-  what breaks so I can fix it.
-
-  The PDF path (get_financials_from_pdf) does combine code I've tested
-  (pdf_extraction.py's statement-location logic, validated against your
-  real Amazon 10-K) with the untested Claude API call (needs your key).
 """
 
 import json
@@ -25,23 +13,7 @@ from yfinance import EquityQuery
 from pdf_extraction import extract_statement_text, build_extraction_prompt
 
 
-# ===========================================================================
-# GET FINANCIALS
-# ===========================================================================
-
 def _first_complete_column(df, required_rows: list):
-    """
-    I find the first column where ALL required rows have real (non-NaN)
-    data. This fixes a bug I found: yfinance sometimes puts a "TTM"
-    (trailing twelve months) column first in stock.financials/
-    balance_sheet/cashflow, and TTM columns can have NaN for line items
-    that aren't computed on a trailing basis (interest expense and total
-    debt are common examples). My old code blindly grabbed columns[0]
-    assuming it was a complete latest fiscal year -- if that column was
-    actually an incomplete TTM column, NaN would silently flow through
-    into WACC and poison the entire DCF with no error, no warning, just
-    "$nanm" showing up in the app.
-    """
     for col in df.columns:
         if all(row in df.index and pd.notna(df.loc[row, col]) for row in required_rows):
             return col
@@ -49,21 +21,13 @@ def _first_complete_column(df, required_rows: list):
 
 
 def get_financials_from_ticker(ticker: str) -> dict:
-    """
-    My real yfinance pull. I have NOT tested this in my sandbox (no
-    network access to Yahoo Finance from here) -- please run this first
-    in Colab and tell me what breaks, since yfinance's exact field names/
-    behavior can shift between versions.
-    """
     stock = yf.Ticker(ticker)
     info = stock.info
 
-    income_stmt = stock.financials  # annual income statement
+    income_stmt = stock.financials
     balance_sheet = stock.balance_sheet
     cash_flow = stock.cashflow
 
-    # THE FIX: I find a column where these three rows are all genuinely
-    # present, instead of blindly trusting columns[0] is complete
     income_col = _first_complete_column(
         income_stmt, ["Total Revenue", "Operating Income", "Net Income"]
     )
@@ -77,7 +41,7 @@ def get_financials_from_ticker(ticker: str) -> dict:
     operating_income = income_stmt.loc["Operating Income", income_col]
     net_income = income_stmt.loc["Net Income", income_col]
 
-    ebitda = info.get("ebitda")  # yfinance sometimes provides this directly
+    ebitda = info.get("ebitda")
     if ebitda is None or pd.isna(ebitda):
         try:
             d_and_a = cash_flow.loc["Depreciation And Amortization", income_col]
@@ -137,10 +101,6 @@ def get_financials_from_ticker(ticker: str) -> dict:
         "tax_rate": tax_rate,
     }
 
-    # I validate the fields the DCF/WACC absolutely cannot function without,
-    # and raise a CLEAR error naming exactly what's missing -- rather than
-    # letting None/NaN quietly flow through and surface as "$nanm" three
-    # steps downstream with no indication of why
     required_for_dcf = ["ebitda", "free_cash_flow", "total_debt", "cash_and_equivalents", "market_cap"]
     missing = [f for f in required_for_dcf if financials[f] is None or (isinstance(financials[f], float) and pd.isna(financials[f]))]
     if missing:
@@ -152,33 +112,31 @@ def get_financials_from_ticker(ticker: str) -> dict:
     return financials
 
 
-def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str = None) -> dict:
+def get_financials_from_pdf(pdf_path: str, anthropic_api_key: str = None,
+                             manual_sector: str = None, manual_industry: str = None) -> dict:
     """
-    FREE by default: uses free_extraction.py's regex-based extractor, zero
-    API calls, zero cost. If you pass an anthropic_api_key, it uses the
-    Claude-API-based extraction instead (in pdf_extraction.py) -- more
-    flexible for unusual filing formats, but costs a fraction of a cent
-    per PDF. The free path handles standard US 10-Ks correctly (tested:
-    8 of 11 fields matched a manually-verified ground truth exactly, and
-    the other 3 turned out to be a genuine accounting-convention question
-    rather than an extraction error -- see free_extraction.py's docstring).
+    FREE by default: uses free_extraction.py's regex-based extractor.
+
+    manual_sector / manual_industry: since a PDF's financial statements
+    never contain sector/industry classification (that's a yfinance/
+    ticker-lookup-only field), the user picks it from a dropdown
+    (industry_options.PDF_INDUSTRY_OPTIONS) and I attach it here exactly
+    as if it had come from yfinance -- this is what lets find_peers() and
+    Comparable Company Analysis work for PDF uploads.
     """
     if anthropic_api_key:
-        return get_financials_from_pdf_api(pdf_path, anthropic_api_key)
+        result = get_financials_from_pdf_api(pdf_path, anthropic_api_key)
+    else:
+        from free_extraction import extract_financials_free
+        result = extract_financials_free(pdf_path)
+        result["ticker"] = "PDF_UPLOAD"
 
-    from free_extraction import extract_financials_free
-    result = extract_financials_free(pdf_path)
-    result["ticker"] = "PDF_UPLOAD"
+    result["sector"] = manual_sector
+    result["industry"] = manual_industry
     return result
 
 
 def get_financials_from_pdf_api(pdf_path: str, anthropic_api_key: str) -> dict:
-    """
-    The Claude-API-based path (costs a small fraction of a cent per PDF).
-    My PDF path: pdfplumber (I've TESTED this, working -- see
-    pdf_extraction.py) + Claude API JSON extraction (needs your key,
-    I haven't been able to test this part myself).
-    """
     import anthropic
 
     statement_text = extract_statement_text(pdf_path)
@@ -196,7 +154,6 @@ def get_financials_from_pdf_api(pdf_path: str, anthropic_api_key: str) -> dict:
     )
 
     result_text = response.content[0].text.strip()
-    # I strip markdown fences if Claude includes them despite my instructions not to
     if result_text.startswith("```"):
         result_text = result_text.split("\n", 1)[1].rsplit("```", 1)[0]
 
@@ -204,53 +161,23 @@ def get_financials_from_pdf_api(pdf_path: str, anthropic_api_key: str) -> dict:
 
 
 def get_financials(company_input: str, input_type: str = "ticker",
-                    anthropic_api_key: str = None) -> dict:
+                    anthropic_api_key: str = None,
+                    manual_sector: str = None, manual_industry: str = None) -> dict:
     """
-    My unified entry point, matching pipeline_core.py's expected signature.
-    input_type: "ticker" or "pdf". anthropic_api_key is now OPTIONAL for
-    "pdf" -- if omitted, uses the free regex-based extractor; if
-    provided, uses the Claude API for potentially more robust extraction
-    on unusual filing formats.
+    Unified entry point. manual_sector/manual_industry are only used
+    when input_type == "pdf" -- ignored otherwise, since ticker lookups
+    already get real sector/industry from yfinance.
     """
     if input_type == "ticker":
         return get_financials_from_ticker(company_input)
     elif input_type == "pdf":
-        return get_financials_from_pdf(company_input, anthropic_api_key)
+        return get_financials_from_pdf(company_input, anthropic_api_key,
+                                        manual_sector, manual_industry)
     else:
         raise ValueError(f"input_type must be 'ticker' or 'pdf', got {input_type!r}")
 
 
-# ===========================================================================
-# PEER DISCOVERY -- yfinance screener + revenue-distance ranking
-# ===========================================================================
-
 def find_peers(financials: dict, n_peers: int = 10) -> list:
-    """
-    Uses yfinance's EquityQuery screener (I confirmed this exists via my
-    docs search earlier) to get all tickers in the same sector+industry,
-    then I rank by closest revenue and take the top n_peers -- not a fixed
-    tolerance band, so this self-adjusts for small-cap vs mega-cap targets,
-    as you suggested.
-
-    Fixes I made after seeing real output for AAPL come back with garbage
-    peers (XIAOMI80.BK, DIXON.NS, CSIOY etc.):
-      1. I restrict to major US exchanges (NMS, NYQ) -- without this, the
-         screener returns every cross-listing of the same underlying
-         company on every exchange worldwide (Bangkok, Frankfurt, Bombay
-         ADRs etc.), which isn't what "comparable companies" means for a
-         standard CCA.
-      2. I dedupe by the company's actual name (longName), not just
-         ticker -- this catches same-company cross-listings the exchange
-         filter alone might miss (e.g. an ADR that still trades on NMS).
-      3. I filter out negative-EBITDA companies -- these produce
-         meaningless multiples (like -0.10x EV/EBITDA) that don't tell you
-         anything comparable about valuation; a distressed/loss-making
-         company isn't a useful comp regardless of sector match.
-
-    NOT TESTED against live data -- please run in Colab and tell me if
-    the peer list looks sensible now (e.g. AAPL should surface names like
-    MSFT, GOOGL, not obscure cross-listings).
-    """
     sector = financials.get("sector")
     industry = financials.get("industry")
     target_revenue = financials.get("revenue")
@@ -258,20 +185,17 @@ def find_peers(financials: dict, n_peers: int = 10) -> list:
     if not sector or not industry:
         raise ValueError(
             "Comparable Company Analysis needs sector/industry classification "
-            "to find peers, but this data doesn't have it. This happens when "
-            "the company info came from a PDF upload -- PDFs don't contain "
-            "sector/industry classification anywhere in the financial "
-            "statements themselves (that's a yfinance/ticker-lookup-only "
-            "field). Comps only works with the Ticker input path for now."
+            "to find peers. For a PDF upload, pick a sector from the dropdown "
+            "before running comps."
         )
 
     query = EquityQuery("and", [
         EquityQuery("eq", ["sector", sector]),
         EquityQuery("eq", ["industry", industry]),
-        EquityQuery("is-in", ["exchange", "NMS", "NYQ"]),  # major US exchanges only
+        EquityQuery("is-in", ["exchange", "NMS", "NYQ"]),
     ])
 
-    results = yf.screen(query, size=250)  # 250 is Yahoo's max per call
+    results = yf.screen(query, size=250)
     candidates = results.get("quotes", [])
 
     seen_names = set()
@@ -279,22 +203,22 @@ def find_peers(financials: dict, n_peers: int = 10) -> list:
     for c in candidates:
         candidate_ticker = c.get("symbol")
         if candidate_ticker == financials.get("ticker"):
-            continue  # I don't include the target itself as its own peer
+            continue
 
         try:
             candidate_info = yf.Ticker(candidate_ticker).info
             candidate_name = candidate_info.get("longName") or candidate_info.get("shortName") or candidate_ticker
             if candidate_name in seen_names:
-                continue  # I skip cross-listings of a company I've already included
+                continue
             candidate_ebitda = candidate_info.get("ebitda")
             if candidate_ebitda is not None and candidate_ebitda <= 0:
-                continue  # I skip distressed/loss-making companies -- meaningless multiples
+                continue
             candidate_revenue = candidate_info.get("totalRevenue")
             if candidate_revenue:
                 candidate_revenues.append((candidate_ticker, candidate_revenue))
                 seen_names.add(candidate_name)
         except Exception:
-            continue  # I skip tickers with unavailable data rather than failing entirely
+            continue
 
     if not candidate_revenues:
         raise ValueError(f"No peer candidates with revenue data found for sector={sector}, industry={industry}")
@@ -303,40 +227,7 @@ def find_peers(financials: dict, n_peers: int = 10) -> list:
     return [ticker for ticker, _ in ranked[:n_peers]]
 
 
-# ===========================================================================
-# COMPS -- I pull EV/EBITDA, P/E, EV/Sales for target + peers
-# ===========================================================================
-
 def run_comps(financials: dict, peers: list) -> dict:
-    """
-    I pull the standard trading multiples for the target + each peer, then
-    compute peer median/mean for each multiple, and use those to derive
-    an ACTUAL implied valuation for the target -- median/mean EV/EBITDA x
-    target's own EBITDA, median/mean EV/Sales x target's own revenue,
-    median/mean P/E x target's own net income. Without this last step, a
-    comps table is just numbers with no conclusion -- the whole point of
-    a CCA is to answer "so what's this company worth, based on how the
-    market prices similar companies?"
-
-    I use median (not just mean) throughout since a couple of extreme
-    peer multiples can otherwise skew the implied value -- same reasoning
-    as the peer-median beta fallback elsewhere in this project.
-
-    Returns:
-      {
-        "table": [ {ticker, company, ev_ebitda, pe, ev_sales}, ... ]
-                 (target company is always row 0),
-        "peer_stats": {"ev_ebitda": {"median":.., "mean":..}, "pe": {...}, "ev_sales": {...}},
-        "implied_valuation": {
-            "ev_from_ebitda_median": .., "ev_from_ebitda_mean": ..,
-            "ev_from_sales_median": .., "ev_from_sales_mean": ..,
-            "equity_from_pe_median": .., "equity_from_pe_mean": ..,
-        }
-      }
-
-    I have NOT tested the yfinance calls live -- please verify the field
-    names in Colab.
-    """
     all_tickers = [financials["ticker"]] + peers
     rows = []
 
@@ -349,10 +240,6 @@ def run_comps(financials: dict, peers: list) -> dict:
             pe = info.get("trailingPE")
             revenue = info.get("totalRevenue")
 
-            # I flag negative EV/EBITDA as None rather than showing a
-            # meaningless negative multiple (this happens for companies
-            # with negative EBITDA -- the ratio itself is not interpretable
-            # as a valuation multiple in that case)
             ev_ebitda = ev / ebitda if ev and ebitda and ebitda > 0 else None
 
             rows.append({
@@ -365,12 +252,8 @@ def run_comps(financials: dict, peers: list) -> dict:
         except Exception:
             rows.append({"ticker": ticker, "company": ticker, "ev_ebitda": None, "pe": None, "ev_sales": None})
 
-    # I compute peer stats from PEERS ONLY (rows[1:]), excluding the target
-    # itself -- the target's own multiple isn't a data point for what the
-    # market pays for similar companies, it's the thing we're trying to
-    # figure out
     def _clean(values):
-        return [v for v in values if v is not None and v == v]  # drop None and NaN
+        return [v for v in values if v is not None and v == v]
 
     peer_rows = rows[1:]
     ev_ebitda_vals = _clean([r["ev_ebitda"] for r in peer_rows])
@@ -391,7 +274,6 @@ def run_comps(financials: dict, peers: list) -> dict:
         "ev_sales": _median_mean(ev_sales_vals),
     }
 
-    # THE ACTUAL VALUATION: peer multiple x target's own fundamentals
     target_ebitda = financials.get("ebitda")
     target_revenue = financials.get("revenue")
     target_net_income = financials.get("net_income")
@@ -406,7 +288,7 @@ def run_comps(financials: dict, peers: list) -> dict:
 
     ev_from_ebitda = _implied(peer_stats["ev_ebitda"], target_ebitda)
     ev_from_sales = _implied(peer_stats["ev_sales"], target_revenue)
-    equity_from_pe = _implied(peer_stats["pe"], target_net_income)  # P/E x net income = equity value directly
+    equity_from_pe = _implied(peer_stats["pe"], target_net_income)
 
     implied_valuation = {
         "ev_from_ebitda_median": ev_from_ebitda["median"],
@@ -418,16 +300,3 @@ def run_comps(financials: dict, peers: list) -> dict:
     }
 
     return {"table": rows, "peer_stats": peer_stats, "implied_valuation": implied_valuation}
-
-
-if __name__ == "__main__":
-    print("This module needs live yfinance access to test -- please run in")
-    print("Colab with a real ticker, e.g.:")
-    print()
-    print("  from data_layer import get_financials, find_peers, run_comps")
-    print("  financials = get_financials('AAPL', input_type='ticker')")
-    print("  print(financials)")
-    print()
-    print("Then tell me what actually comes back (or what errors you hit)")
-    print("so I can fix field names / add fallbacks where yfinance's real")
-    print("behavior differs from what I expected.")
