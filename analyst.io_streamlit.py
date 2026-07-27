@@ -56,7 +56,7 @@ def format_currency(value: float) -> str:
 
 
 st.set_page_config(page_title="Valuation Pipeline", layout="wide")
-st.title("DCF / Comps / LBO Valuation Pipeline")
+st.title("Analyst.io")
 
 st.info(
     "I've wired this to real data now (yfinance for tickers, the Claude API "
