@@ -55,7 +55,7 @@ def format_currency(value: float) -> str:
         return f"${value:,.0f}"
 
 
-st.set_page_config(page_title="Valuation Pipeline", layout="wide")
+st.set_page_config(page_title="Analyst.io", layout="wide")
 st.title("Analyst.io")
 
 st.info(
