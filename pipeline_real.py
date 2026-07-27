@@ -7,7 +7,7 @@ but calling REAL functions instead of mocks.
 
 from data_layer import get_financials, find_peers, run_comps
 from wacc_beta import calculate_beta, get_risk_free_rate, calculate_market_risk_premium, \
-    estimate_beta_and_premium_from_peers, estimate_capital_weights_from_peers, calculate_wacc
+    estimate_beta_from_peers, estimate_capital_weights_from_peers, calculate_wacc
 from dcf_engine import run_dcf_real
 from lbo_financing import build_capital_structure, project_debt_schedule, calculate_returns
 from pipeline_orchestrator import recommend_financing
@@ -29,6 +29,12 @@ def run_full_dcf(financials: dict) -> dict:
     peer-median capital structure (debt/(debt+equity)) via
     estimate_capital_weights_from_peers(), and pass that into calculate_wacc
     as a fallback for the equity/debt weighting.
+
+    Note market_risk_premium is deliberately computed ONCE, from the
+    broad market (S&P 500), and never overwritten in the fallback branch --
+    it's a market-wide quantity, not something that needs (or should use)
+    a peer-group-specific substitute. Only beta -- which is genuinely
+    company-specific -- uses the peer proxy when the target is unlisted.
     """
     risk_free_rate = get_risk_free_rate()
     market_risk_premium = calculate_market_risk_premium(risk_free_rate)
@@ -39,9 +45,7 @@ def run_full_dcf(financials: dict) -> dict:
         beta = calculate_beta(ticker)
     except Exception:
         peers = find_peers(financials, n_peers=10)
-        fallback = estimate_beta_and_premium_from_peers(peers, risk_free_rate)
-        beta = fallback["beta"]
-        market_risk_premium = fallback["market_risk_premium"]
+        beta = estimate_beta_from_peers(peers)
         if financials.get("market_cap") is None:
             peer_capital_weights = estimate_capital_weights_from_peers(peers)
 
